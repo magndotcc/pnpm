@@ -15,20 +15,23 @@
 //! negation such as `--no-runtime` has no positive spelling to resolve
 //! to, which leaves a false value on one for clap to report.
 //!
-//! Two of nopt's spellings stay with clap as well. A value written as its
-//! own token (`--prod false`) would have to be claimed in
-//! [`option_width`], the width rule every pre-clap scan shares, and a
-//! foreign command line names its program with a positional: `pnpm -r
-//! exec --report-summary true` runs `true`. A value on a short
-//! (`-P=false`) reaches nopt through its shorthand table, which splices
-//! `-P` into `--prod` before the value rule applies, where clap parses a
-//! cluster on its own terms.
+//! A value written as its own token (`--frozen-lockfile false`) is
+//! collapsed the same way when leaving it would turn `pnpm install` into
+//! `pnpm add`. `add` does not declare that flag, so the parse fails
+//! (pnpm/pnpm#14741). A flag `add` does declare stays a package name:
+//! `pnpm install --prod false` adds the package `false`. The token is not
+//! claimed in [`option_width`]: that width is shared with the scan that
+//! finds a child command, and `pnpm -r exec --report-summary true` runs
+//! the program `true`. A value on a short (`-P=false`) reaches nopt
+//! through its shorthand table, which splices `-P` into `--prod` before
+//! the value rule applies, where clap parses a cluster on its own terms.
 
 use crate::{
     boolean_negations::negation_of,
     cli_args::grammar,
     config_overrides::parse_bool,
-    parse_boundary::{option_width, passthrough_from, union_arity},
+    flag_relocation::ArgTable,
+    parse_boundary::{command_boundary, option_width, passthrough_from, union_arity},
 };
 use clap::{Arg, ArgAction, Command};
 use std::{
@@ -38,7 +41,10 @@ use std::{
 };
 
 /// Rewrite every `--<flag>=<bool>` token in `argv` into the bare flag or
-/// its negation. See the module docs.
+/// its negation. A following boolean token (`--<flag> false`) is collapsed
+/// the same way when `install` would otherwise treat it as a package name
+/// and hand the line to `add`, which does not declare the flag. See the
+/// module docs.
 ///
 /// Tokens are stepped over with [`option_width`], the width rule the
 /// pre-clap scans share, so a value that happens to spell a boolean flag
@@ -47,7 +53,8 @@ use std::{
 pub fn resolve_boolean_values(mut argv: Vec<OsString>) -> Vec<OsString> {
     let flags = boolean_flags();
     let arity = union_arity();
-    let owned_by_pnpm = passthrough_from(&argv).unwrap_or(argv.len()).min(argv.len());
+    let mut owned_by_pnpm = passthrough_from(&argv).unwrap_or(argv.len()).min(argv.len());
+    let mut child_program = child_program_index(&argv);
 
     let mut index = 1;
     while index < owned_by_pnpm {
@@ -70,11 +77,97 @@ pub fn resolve_boolean_values(mut argv: Vec<OsString>) -> Vec<OsString> {
             && let Some(spelling) = flags.spelling_for(name, value)
         {
             argv[index] = spelling;
+        } else if width == 1
+            && child_program != Some(index + 1)
+            && install_precedes(&argv, index, arity)
+            && let Some(name) = bare_long_flag(token)
+            && !add_declares(name)
+            && let Some(spelling) = separate_boolean_spelling(flags, token, next)
+        {
+            argv[index] = spelling;
+            argv.remove(index + 1);
+            if let Some(program) = child_program.as_mut()
+                && *program > index
+            {
+                *program -= 1;
+            }
+            if owned_by_pnpm > index + 1 {
+                owned_by_pnpm -= 1;
+            }
         }
         index += width;
     }
 
     argv
+}
+
+/// The spelling a separate boolean token collapses `--<token>` to.
+///
+/// `None` when `token` is not a bare boolean flag or `next` is not a
+/// boolean, both of which leave the tokens for clap.
+fn separate_boolean_spelling(
+    flags: &BooleanFlags,
+    token: &str,
+    next: Option<&str>,
+) -> Option<OsString> {
+    flags.spelling_for(bare_long_flag(token)?, next?)
+}
+
+/// The long flag name in a bare `--name` token.
+fn bare_long_flag(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("--")
+        .filter(|rest| !rest.is_empty() && !rest.contains('='))
+}
+
+/// Whether `add` declares `name`, including aliases.
+///
+/// `pnpm install <pkg>` is parsed as `add`. A boolean token after a flag
+/// `add` declares is that package, so it has to stay. A flag `add` does
+/// not declare cannot be a package name: the rewritten command fails.
+fn add_declares(name: &str) -> bool {
+    grammar()
+        .find_subcommand("add")
+        .is_some_and(|add| {
+            add.get_arguments()
+                .flat_map(spellings)
+                .any(|long| long == name)
+        })
+}
+
+/// Whether an `install` command (or its `i` alias) sits before `flag_index`.
+fn install_precedes(argv: &[OsString], flag_index: usize, arity: &ArgTable) -> bool {
+    let mut index = 1;
+    while index < flag_index && index < argv.len() {
+        let Some(token) = argv[index].to_str() else {
+            return false;
+        };
+        if token == "--" {
+            return false;
+        }
+        let next = argv
+            .get(index + 1)
+            .and_then(|token| token.to_str());
+        if let Some(width) = option_width(token, next, arity) {
+            index += width;
+            continue;
+        }
+        return token == "install" || token == "i";
+    }
+    false
+}
+
+/// Index of the token that names a child program or script.
+///
+/// [`command_boundary`] points at the first forwarded argument, so the
+/// name sits one slot earlier. A command pnpm parses itself has no
+/// boundary, and a boolean token after one of its flags is that flag's
+/// value.
+fn child_program_index(argv: &[OsString]) -> Option<usize> {
+    let boundary = command_boundary(argv)?;
+    boundary.index
+        .checked_sub(1)
+        .filter(|index| *index > 0)
 }
 
 /// Every boolean flag spelling in the grammar, paired with the spelling

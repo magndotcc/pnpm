@@ -46,3 +46,16 @@ fn a_negated_recursive_flag_is_not_recorded_as_coming_from_the_command_line() {
     assert!(!recursive_from_command_line(&["pnpm", "install", "-r", "--no-recursive"]));
     assert!(!recursive_from_command_line(&["pnpm", "install"]));
 }
+
+#[test]
+fn frozen_lockfile_false_stays_install_and_turns_the_flag_off() {
+    let (command, argv) =
+        prepare_cli_argv(argv(&["pnpm", "install", "--frozen-lockfile", "false"]));
+    let args = parse_cli_args(command, argv).expect("--frozen-lockfile false should parse");
+    match args.command {
+        crate::cli_args::cli_command::CliCommand::Install(install) => {
+            assert_eq!(install.frozen_lockfile_flag(), Some(false));
+        }
+        other => panic!("expected install, parsed {other:?}"),
+    }
+}

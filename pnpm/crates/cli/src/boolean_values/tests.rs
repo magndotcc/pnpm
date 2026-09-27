@@ -46,14 +46,59 @@ fn a_true_value_turns_the_flag_on() {
     }
 }
 
-/// A foreign command line names its program with a positional, so a
-/// boolean token after a flag stays a positional. See the module docs.
+/// `false` after `--frozen-lockfile` is the flag's value. Left in place it
+/// is a package name, `install` becomes `add`, and `add` rejects the flag.
 #[test]
-fn a_value_written_as_its_own_token_is_left_alone() {
+fn a_frozen_lockfile_value_written_as_its_own_token_sets_the_flag() {
+    assert_eq!(
+        resolve(&["pnpm", "install", "--frozen-lockfile", "false"]),
+        ["pnpm", "install", "--no-frozen-lockfile"],
+    );
+    assert_eq!(
+        resolve(&["pnpm", "i", "--frozen-lockfile", "0"]),
+        ["pnpm", "i", "--no-frozen-lockfile"],
+    );
+    assert_eq!(
+        resolve(&["pnpm", "install", "--frozen-lockfile", "true"]),
+        ["pnpm", "install", "--frozen-lockfile"],
+    );
+    assert_eq!(
+        resolve(&["pnpm", "install", "--frozen-lockfile", "1"]),
+        ["pnpm", "install", "--frozen-lockfile"],
+    );
+    let frozen =
+        install_flag(&["pnpm", "install", "--frozen-lockfile", "false"], "frozen_lockfile")
+            .expect("--frozen-lockfile false should parse");
+    assert!(!frozen);
+    let no_frozen =
+        install_flag(&["pnpm", "install", "--frozen-lockfile", "false"], "no_frozen_lockfile")
+            .expect("--frozen-lockfile false should parse");
+    assert!(no_frozen);
+    let turned_on =
+        install_flag(&["pnpm", "install", "--frozen-lockfile", "true"], "frozen_lockfile")
+            .expect("--frozen-lockfile true should parse");
+    assert!(turned_on);
+}
+
+/// A flag `add` declares keeps a following boolean token as the package
+/// name. `pnpm install --prod false` adds the package `false`.
+#[test]
+fn a_package_named_false_after_a_flag_add_declares_is_left_alone() {
     let original = ["pnpm", "install", "--prod", "false"];
     assert_eq!(resolve(&original), original);
+    let add = ["pnpm", "add", "--save-dev", "false"];
+    assert_eq!(resolve(&add), add);
+}
+
+/// A foreign command line names its program with a positional, so a
+/// boolean token in that position stays the program name. See the module
+/// docs.
+#[test]
+fn a_child_program_named_true_is_left_alone() {
     let exec = ["pnpm", "-r", "exec", "--report-summary", "true"];
     assert_eq!(resolve(&exec), exec);
+    let script = ["pnpm", "--prod", "false"];
+    assert_eq!(resolve(&script), script);
 }
 
 #[test]
